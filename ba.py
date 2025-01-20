@@ -5,7 +5,7 @@ Bundle Adjustment using GBP.
 import numpy as np
 import argparse
 from gbp import gbp_ba
-import vis
+# import vis
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--bal_file", required=True,
@@ -76,9 +76,9 @@ graph.generate_priors_var(weaker_factor=args.prior_std_weaker_factor)
 graph.update_all_beliefs()
 
 # Set up visualisation
-scene = vis.ba_vis.create_scene(graph)
-viewer = vis.ba_vis.TrimeshSceneViewer(scene=scene, resolution=scene.camera.resolution)
-viewer.show()
+# scene = vis.ba_vis.create_scene(graph)
+# viewer = vis.ba_vis.TrimeshSceneViewer(scene=scene, resolution=scene.camera.resolution)
+# viewer.show()
 
 
 for i in range(args.n_iters):
@@ -100,7 +100,7 @@ for i in range(args.n_iters):
             n_factor_relins += 1
     print(f'Iteration {i} // ARE {are:.4f} // Energy {energy:.4f} // Num factors relinearising {n_factor_relins}')
 
-    viewer.update(graph)
+    # viewer.update(graph)
 
     graph.synchronous_iteration(robustify=True, local_relin=True)
 

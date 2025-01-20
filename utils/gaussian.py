@@ -1,7 +1,7 @@
 import numpy as np
 
 
-class NdimGaussian:
+class NdimGaussian(object):
     def __init__(self, dimensionality, eta=None, lam=None):
         self.dim = dimensionality
 
@@ -14,3 +14,11 @@ class NdimGaussian:
             self.lam = lam
         else:
             self.lam = np.zeros([self.dim, self.dim])
+
+    @property
+    def mu(self):
+        return np.linalg.inv(self.lam) @ self.eta
+
+    @property
+    def Sigma(self):
+        return np.linalg.inv(self.lam)

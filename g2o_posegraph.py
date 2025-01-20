@@ -9,27 +9,62 @@ The linear factors measure the distance between the nodes in each of the N dimen
 import numpy as np
 import argparse
 
-from gbp import gbp
+from gbp import gbp_g2o
 from gbp.factors import linear_displacement
 
 np.random.seed(0)
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--n_varnodes", type=int, default=50,
-                    help="Number of variable nodes.")
-parser.add_argument("--dim", type=int, default=6,
-                    help="Dimensionality of space nodes exist in (dofs of variables)")
-parser.add_argument("--M", type=int, default=10,
-                    help="Each node is connected to its k closest neighbours by a measurement.")
-parser.add_argument("--gauss_noise_std", type=float, default=1.,
-                    help="Standard deviation of Gaussian noise added to measurement model (pixels)")
+parser.add_argument("--g2o_file", required=True,
+                    help="g2o style file with POSE3 data")
 
 parser.add_argument("--n_iters", type=int, default=50,
                     help="Number of iterations of GBP")
+                    
+parser.add_argument("--gauss_noise_std", type=int, default=2,
+                    help="Standard deviation of Gaussian noise of measurement model.")
+parser.add_argument("--loss", default=None,
+                    help="Loss function: None (squared error), huber or constant.")
+parser.add_argument("--Nstds", type=float, default=3.,
+                    help="If loss is not None, number of stds at which point the "
+                         "loss transitions to linear or constant.")
+parser.add_argument("--beta", type=float, default=0.01,
+                    help="Threshold for the change in the mean of adjacent beliefs for "
+                         "relinearisation at a factor.")
+parser.add_argument("--num_undamped_iters", type=int, default=6,
+                    help="Number of undamped iterations at a factor node after relinearisation.")
+parser.add_argument("--min_linear_iters", type=int, default=8,
+                    help="Minimum number of iterations between consecutive relinearisations of a factor.")
+parser.add_argument("--eta_damping", type=float, default=0.4,
+                    help="Max damping of information vector of messages.")
+
+parser.add_argument("--prior_std_weaker_factor", type=float, default=50.,
+                    help="Ratio of std of information matrix at measurement factors / "
+                         "std of information matrix at prior factors.")
+
+parser.add_argument("--float_implementation", action='store_true', default=False,
+                    help="Float implementation, so start with strong priors that are weakened")
+parser.add_argument("--final_prior_std_weaker_factor", type=float, default=100.,
+                    help="Ratio of information at measurement factors / information at prior factors "
+                         "after the priors are weakened (for floats implementation).")
+parser.add_argument("--num_weakening_steps", type=int, default=5,
+                    help="Number of steps over which the priors are weakened (for floats implementation)")
+
 
 args = parser.parse_args()
 print('Configs: \n', args)
+configs = dict({
+    'gauss_noise_std': args.gauss_noise_std,
+    'loss': args.loss,
+    'Nstds': args.Nstds,
+    'beta': args.beta,
+    'num_undamped_iters': args.num_undamped_iters,
+    'min_linear_iters': args.min_linear_iters,
+    'eta_damping': args.eta_damping,
+    'prior_std_weaker_factor': args.prior_std_weaker_factor,
+           })
+graph = gbp_g2o.create_g2o_graph(args.g2o_file, configs)
 
 
 # Create priors
@@ -69,8 +104,8 @@ graph = gbp.FactorGraph(nonlinear_factors=False)
 # Initialize variable nodes for frames with prior
 for i in range(args.n_varnodes):
     new_var_node = gbp.VariableNode(i, args.dim)
-    new_var_node.prior.eta = priors_eta[i]*2
-    new_var_node.prior.lam = priors_lambda[i]*10
+    new_var_node.prior.eta = priors_eta[i]
+    new_var_node.prior.lam = priors_lambda[i]
     graph.var_nodes.append(new_var_node)
 
 for f, measurement in enumerate(noisy_measurements):

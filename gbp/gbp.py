@@ -371,3 +371,121 @@ class Factor:
         for v in range(len(self.adj_vIDs)):
             self.messages[v].lam = messages_lam[v]
             self.messages[v].eta = messages_eta[v]
+
+
+class ContractionFactor(Factor):
+    def __init__(
+        self, factor_id, adj_var_nodes, measurement, gauss_noise_std, loss, Nstds
+    ):
+        measurement = measurement * 0.0
+        Factor.__init__(self, factor_id, adj_var_nodes, measurement, gauss_noise_std=gauss_noise_std, meas_fn=None, jac_fn=None, loss=loss, mahalanobis_threshold=Nstds)
+        # 2d float np array, init to inf
+        self.d_last = np.array([np.inf] * len(adj_var_nodes))
+        self.alpha=0.9
+        
+        # initialize messages
+        init_eta=np.zeros(self.adj_var_nodes[0].dofs)
+        init_Sigma=np.eye(self.adj_var_nodes[0].dofs)
+        init_lambda=np.linalg.inv(init_Sigma)
+        for v in range(len(self.adj_vIDs)):
+            self.messages[v]=NdimGaussian(self.adj_var_nodes[v].dofs, init_eta, init_lambda)
+
+    def compute_factor(self, linpoint=None, update_self=True):
+        pass
+
+    def compute_residual(self):
+        return 0
+
+    def compute_messages(self, eta_damping):
+        """
+        Compute all outgoing messages from the factor.
+        """
+        # must have only two adjacent nodes
+        assert len(self.adj_vIDs) == 2
+        messages=[]
+        start_dim = 0
+
+        for v in range(len(self.adj_vIDs)):
+            messages.append(self.adj_var_nodes[v].belief)
+
+        # swap the belief of nodes as output message
+        messages[0], messages[1] = messages[1], messages[0]
+
+        for v in range(len(self.adj_vIDs)):
+            self.messages[v]=self.contraction(self.messages[v], messages[v], v)
+
+    def dz(self, z1: NdimGaussian, z2: NdimGaussian):  # z1 - z2
+        mu1 = np.linalg.inv(z1.lam) @ z1.eta
+        mu2 = np.linalg.inv(z2.lam) @ z2.eta
+        Sigma1 = np.linalg.inv(z1.lam)
+        Sigma2 = np.linalg.inv(z2.lam)
+
+        dmu = mu1 - mu2
+        dSigma = (Sigma1 + Sigma2)/2
+        dlambda = np.linalg.inv(dSigma)
+        deta = dlambda @ dmu
+        return NdimGaussian(dmu.shape[0], deta, dlambda)
+
+    
+    def kl_divergence_gaussian(self,p: NdimGaussian, q: NdimGaussian) -> float:
+        """
+        Compute the Kullback-Leibler divergence between two NdimGaussian distributions.
+        
+        Parameters:
+        p (NdimGaussian): The first Gaussian distribution.
+        q (NdimGaussian): The second Gaussian distribution.
+        
+        Returns:
+        float: The KL divergence between p and q.
+        """
+        mu_p = p.mu
+        mu_q = q.mu
+        Sigma_p = p.Sigma
+        Sigma_q = q.Sigma
+
+        term1 = np.trace(np.linalg.inv(Sigma_q) @ Sigma_p)
+        term2 = (mu_q - mu_p).T @ np.linalg.inv(Sigma_q) @ (mu_q - mu_p)
+        term3 = np.log(np.linalg.det(Sigma_q) / np.linalg.det(Sigma_p))
+        k = p.dim
+
+        return 0.5 * (term1 + term2 - k + term3)
+
+    def contraction(self,z1: NdimGaussian, z2: NdimGaussian, i: int) -> NdimGaussian:
+        _lambda = 1.0
+
+        # compute new lambda
+        d_current= self.kl_divergence_gaussian(z1, z2)
+        # print(d_current)
+        if(d_current<1e-6):
+            return z1
+
+        dz= self.dz(z1, z2)
+        
+        alpha=0.9
+        d_reset=3
+        d_target=alpha*self.d_last[i]*alpha
+        if(d_current<=d_target or d_current>d_reset):
+            self.d_last[i]=d_current
+            return z2
+        
+        Sigma1 = np.linalg.inv(z1.lam)
+        Sigmad = np.linalg.inv(dz.lam)
+        mu1 = np.linalg.inv(z1.lam) @ z1.eta
+        dmu = np.linalg.inv(dz.lam) @ dz.eta
+
+        diff=np.transpose(dmu)@np.linalg.inv(Sigma1)@dmu
+        tr=(np.trace(np.linalg.inv(Sigma1)@Sigmad))
+        denom=tr+diff
+        
+        if(denom<1e-6):
+            _lambda=1
+        else:
+            _lambda=np.sqrt(2*d_target/denom)
+
+        _lambda=np.min([_lambda,1])
+
+        new_Sigma = Sigma1 + Sigmad * _lambda * _lambda
+        new_lambda = np.linalg.inv(new_Sigma)
+        new_mu = mu1 + _lambda * dmu
+        new_eta = new_lambda @ new_mu
+        return NdimGaussian(new_mu.shape[0], new_eta, new_lambda)
