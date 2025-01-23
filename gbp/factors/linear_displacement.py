@@ -6,9 +6,16 @@ Linear displacement factor for measurement function h(x_1, x_2) = x_2 - x_1 and 
 
 
 def meas_fn(x):
-    J = np.hstack((-np.eye(int(len(x) / 2)), np.eye(int(len(x) / 2))))
+    J = np.hstack((np.eye(int(len(x) / 2)), -np.eye(int(len(x) / 2))))
     return J @ x
 
 
 def jac_fn(x):
-    return np.hstack((-np.eye(int(len(x) / 2)), np.eye(int(len(x) / 2))))
+    return np.hstack((np.eye(int(len(x) / 2)), -np.eye(int(len(x) / 2))))
+
+def self_jac_fn(x):
+    return np.eye(len(x))
+
+def self_meas_fn(x):
+    return x
+

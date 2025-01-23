@@ -14,6 +14,9 @@ class NdimGaussian(object):
             self.lam = lam
         else:
             self.lam = np.zeros([self.dim, self.dim])
+        
+        self.Jacobian = None
+        self.energy = None
 
     @property
     def mu(self):

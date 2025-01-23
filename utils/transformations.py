@@ -47,19 +47,19 @@ def normalize(v, tolerance=1e-4):
 class Quaternion:
 
     def __init__(self, q=None, axis=None, angle=None):
-        axis = normalize(axis)  # Normalize the axis vector so we have a unit quaternion
-
-        if q is None:
+        if axis is not None:
+            axis = self.normalize(axis)  # Normalize the axis vector so we have a unit quaternion
+        if q is None and axis is not None and angle is not None:
             self.w = np.cos(angle / 2)
             self.x = np.sin(angle / 2) * axis[0]
             self.y = np.sin(angle / 2) * axis[1]
             self.z = np.sin(angle / 2) * axis[2]
-
             self.q = np.array([self.w, self.x, self.y, self.z])
-
-        if q is not None:
+        elif q is not None:
             self.q = q
-
+        else:
+            raise ValueError("Invalid input for quaternion initialization.")
+        
     def rotate(self, v):
         point = np.array([0, v[0], v[1], v[2]])
         return q_multiply(q_multiply(self.q, point), self.conjugate)[1:]

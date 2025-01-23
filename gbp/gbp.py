@@ -2,6 +2,7 @@
     Defines classes for variable nodes, factor nodes and edges and factor graph.
 """
 
+import copy
 import numpy as np
 import scipy.linalg
 
@@ -40,7 +41,8 @@ class FactorGraph:
         energy = 0
         for factor in self.factors:
             # Variance of Gaussian noise at each factor is weighting of each term in squared loss.
-            energy += 0.5 * np.linalg.norm(factor.compute_residual()) ** 2 / factor.adaptive_gauss_noise_var
+            # energy += 0.5 * np.linalg.norm(factor.compute_residual()) ** 2 / factor.adaptive_gauss_noise_var
+            energy += factor.energy()
         return energy
 
     def compute_all_messages(self, local_relin=True):
@@ -172,31 +174,191 @@ class VariableNode:
         self.prior_lambda_logdiff = -1
 
         self.dofs = dofs
+        self.constant = False
+        self.energy_history = []
+        self.gradient_history = []
+
+    def dz(self, z1: NdimGaussian, z2: NdimGaussian):  # z1 - z2
+        mu1 = np.linalg.inv(z1.lam) @ z1.eta
+        mu2 = np.linalg.inv(z2.lam) @ z2.eta
+        Sigma1 = np.linalg.inv(z1.lam)
+        Sigma2 = np.linalg.inv(z2.lam)
+
+        dmu = mu1 - mu2
+        dSigma =  Sigma2 + Sigma1
+        dlambda = np.linalg.inv(dSigma)
+        deta = dlambda @ dmu
+        return NdimGaussian(dmu.shape[0], deta, dlambda)
+
+    
+    def kl_divergence_gaussian(self,p: NdimGaussian, q: NdimGaussian) -> float:
+        """
+        Compute the Kullback-Leibler divergence between two NdimGaussian distributions.
+        
+        Parameters:
+        p (NdimGaussian): The first Gaussian distribution.
+        q (NdimGaussian): The second Gaussian distribution.
+        
+        Returns:
+        float: The KL divergence between p and q.
+        """
+        mu_p = p.mu
+        mu_q = q.mu
+        Sigma_p = p.Sigma
+        Sigma_q = q.Sigma
+
+        term1 = np.trace(np.linalg.inv(Sigma_q) @ Sigma_p)
+        term2 = (mu_q - mu_p).T @ np.linalg.inv(Sigma_q) @ (mu_q - mu_p)
+        term3 = np.log(np.linalg.det(Sigma_q) / np.linalg.det(Sigma_p))
+        k = p.dim
+
+        return 0.5 * (term1 + term2 - k + term3)
+
+    def contraction(self,z1: NdimGaussian, z2: NdimGaussian, i: int) -> NdimGaussian:
+        _lambda = 1.0
+
+        # compute new lambda
+        d_current= self.kl_divergence_gaussian(z1, z2)
+        # print(d_current)
+        if(d_current<1e-6):
+            return z2
+
+        dz= self.dz(z2, z1)
+        
+        alpha=0.9
+        d_reset=1 # chi2 - dim
+        d_target=alpha*self.d_last[i]*alpha
+        if(d_current<=d_target or d_current>d_reset):
+            self.d_last[i]=d_current
+            return z2
+        
+        Sigma1 = np.linalg.inv(z1.lam)
+        Sigmad = np.linalg.inv(dz.lam)
+        mu1 = np.linalg.inv(z1.lam) @ z1.eta
+        dmu = np.linalg.inv(dz.lam) @ dz.eta
+
+        diff=np.transpose(dmu)@np.linalg.inv(Sigma1)@dmu
+        tr=(np.trace(np.linalg.inv(Sigma1)@Sigmad))
+        denom=tr+diff
+        
+        if(denom<1e-6):
+            _lambda=1
+        else:
+            _lambda=np.sqrt(2*d_target/denom)
+
+        _lambda=np.min([_lambda,1])
+
+        new_Sigma = Sigma1 + Sigmad * _lambda * _lambda
+        new_lambda = np.linalg.inv(new_Sigma)
+        new_mu = mu1 + _lambda * dmu
+        new_eta = new_lambda @ new_mu
+        return NdimGaussian(new_mu.shape[0], new_eta, new_lambda)
+
+    def compute_messages(self):
+        """
+        Compute all outgoing messages from the factor.
+        """
+        # must have only two adjacent nodes
+        assert len(self.adj_vIDs) == 2
+        _messages=[]
+        start_dim = 0
+
+        for v in range(len(self.adj_vIDs)):
+            belief_id=self.adj_vIDs.index(self.adj_var_nodes[v].variableID)
+            _messages.append(copy.deepcopy(self.adj_var_nodes[v].belief))
+        
+        # swap the belief of nodes as output message
+        swap=_messages[0]
+        _messages[0]=_messages[1]
+        _messages[1]=swap
+
+        for v in range(len(self.adj_vIDs)):
+            self.messages[v]=self.contraction(self.messages[v], copy.deepcopy(_messages[v]), v)
 
     def update_belief(self):
         """
             Update local belief estimate by taking product of all incoming messages along all edges.
             Then send belief to adjacent factor nodes.
         """
+        if self.constant:
+            for factor in self.adj_factors:
+                belief_ix = factor.adj_vIDs.index(self.variableID)
+                factor.adj_beliefs[belief_ix].eta, factor.adj_beliefs[belief_ix].lam = self.belief.eta, self.belief.lam
+            return
         # Update local belief
-        eta = self.prior.eta.copy()
-        lam = self.prior.lam.copy()
+        # print(f"Before Node {self.variableID} belief: {self.mu},\n {self.Sigma}")
+        # eta = self.prior.eta.copy()
+        # lam = self.prior.lam.copy()
+        # eta = np.zeros(self.dofs)
+        # lam = np.zeros([self.dofs, self.dofs])
+        # eta = self.belief.eta.copy()
+        # lam = self.belief.lam.copy()
+        # the sum of dimention of all adjacent factors
+        Jacobian = np.empty((0, self.dofs))  # Initialize an empty 2D array with 0 rows and self.dofs columns
+        Jacobian_list = []
+        # Initialize an empty 2D array with 0 rows and 1 columns
+        energy = np.empty((0, 1))
+        gradient = np.zeros([self.dofs, 1])
+        eta_d = np.zeros(self.dofs)
+        lam_d = np.eye(self.dofs) * 1e-6
+
         for factor in self.adj_factors:
             message_ix = factor.adj_vIDs.index(self.variableID)
             eta_inward, lam_inward = factor.messages[message_ix].eta, factor.messages[message_ix].lam
-            eta += eta_inward
-            lam += lam_inward
-
-        self.belief.eta = eta 
-        self.belief.lam = lam
+            eta_d += eta_inward
+            lam_d += lam_inward
+            if factor.messages[message_ix].Jacobian is not None:
+                # add one float into energy
+                Jacobian = np.concatenate((Jacobian, factor.messages[message_ix].Jacobian), axis=0)
+                Jacobian_list.append(factor.messages[message_ix].Jacobian)
+                # print(f"Node {self.variableID} {Jacobian}")
+            if factor.messages[message_ix].energy is not None:
+                energy = np.concatenate((energy, np.array([[factor.messages[message_ix].energy]])), axis=0)
+        # print the rank of Jacobian
+        if len(Jacobian) > 0:
+            # print(f"Node {self.variableID} rank(J) {np.linalg.matrix_rank(Jacobian)} condition number {np.linalg.cond(Jacobian)} singular values {np.linalg.svd(Jacobian)[1]}")
+            # print local hesse matrix by local Jacobian
+            gradient = [Jacobian_list[i] * energy[i] for i in range(len(energy))]
+            # print(f"Node {self.variableID} Jacobian {Jacobian}")
+            H = Jacobian.T @ Jacobian
+            e_sqre = energy.transpose() @ energy
+            self.energy_history.append(e_sqre.tolist()[0][0])
+            self.gradient_history.append(gradient)
+            # print(f"Node {self.variableID} gradient {np.sum(gradient, axis=0)}")
+            # sum the gradient vertically
+            # print(f"Hessian {H} eigenvalues {np.linalg.eigvals(H)} energy {e_sqre}")
+        # compare the prior and the belief
+        mu_from_message, sigma_from_message = None, None
+        if np.linalg.det(lam_d) > 1e-6:
+            sigma_from_message = np.linalg.inv(lam_d)
+            mu_from_message = sigma_from_message @ eta_d
+        
+        # belif
+        # belief = eta + self.belief.eta
+        if sigma_from_message is not None and mu_from_message is not None:
+            d = mu_from_message - self.mu
+            r = 0.5 * (d.transpose() @ sigma_from_message @ d)
+            # self.prior.lam /= (r/10) 
+            # p = NdimGaussian(self.dofs, eta, lam)
+            # q = NdimGaussian(self.dofs, self.prior.eta.copy(), self.prior.lam.copy())
+            # kl = self.kl_divergence_gaussian(p, q) + self.kl_divergence_gaussian(q, p)
+            # print(f"After Node {self.variableID} r {r}")
+        # relax currect belief
+        self.belief.eta = eta_d + self.prior.eta.copy()
+        self.belief.lam = lam_d + self.prior.lam.copy()
         self.Sigma = np.linalg.inv(self.belief.lam)
         self.mu = self.Sigma @ self.belief.eta
+        # compare sigma from message and self.Sigma
+
+
+        # if kl divergence between prior and message is large, then penalty the prior
+
+        # self.prior=copy.deepcopy(self.belief)
         
         # Send belief to adjacent factors
         for factor in self.adj_factors:
             belief_ix = factor.adj_vIDs.index(self.variableID)
             factor.adj_beliefs[belief_ix].eta, factor.adj_beliefs[belief_ix].lam = self.belief.eta, self.belief.lam
-
 
 class Factor:
     def __init__(self,
@@ -262,7 +424,14 @@ class Factor:
         """
             Computes the squared error using the appropriate loss function.
         """
-        return 0.5 * np.linalg.norm(self.compute_residual()) ** 2 / self.adaptive_gauss_noise_var
+        if isinstance(self.adaptive_gauss_noise_var, float):
+            return 0.5 * np.linalg.norm(self.compute_residual()) ** 2 / self.adaptive_gauss_noise_var
+        else:
+            r = self.compute_residual()
+            # self.adaptive_gauss_noise_var is a vector of variances for each dimension of the residual
+            assert r.shape[0] == len(self.adaptive_gauss_noise_var)
+            info = np.diag(1 / self.adaptive_gauss_noise_var)
+            return 0.5 * r.T @ np.diag(1 / self.adaptive_gauss_noise_var) @ r
 
     def compute_factor(self, linpoint=None, update_self=True):
         """
@@ -278,6 +447,10 @@ class Factor:
             self.linpoint = linpoint
 
         J = self.jac_fn(self.linpoint, *self.args)
+        for v in range(len(self.adj_vIDs)):
+            self.messages[v].Jacobian = J[:, v * self.adj_var_nodes[v].dofs:(v + 1) * self.adj_var_nodes[v].dofs]
+            # print(f"Jacobian {self.messages[v].Jacobian}")
+        # print(f"Fator {self.factorID} rank(J) {np.linalg.matrix_rank(J)} condition number {np.linalg.cond(J)} singular values {np.linalg.svd(J)[1]}")
         pred_measurement = self.meas_fn(self.linpoint, *self.args)
         if isinstance(self.measurement, float):
             meas_model_lambda = 1 / self.adaptive_gauss_noise_var
@@ -327,9 +500,12 @@ class Factor:
                     self.robust_flag = False
                     self.adaptive_gauss_noise_var = self.gauss_noise_var
 
-        # Update factor using existing linearisation point (we are not relinearising).
-        self.factor.eta *= old_adaptive_gauss_noise_var / self.adaptive_gauss_noise_var
-        self.factor.lam *= old_adaptive_gauss_noise_var / self.adaptive_gauss_noise_var
+        scale_factor = old_adaptive_gauss_noise_var / self.adaptive_gauss_noise_var
+        if not isinstance(scale_factor, float):
+            assert(len(scale_factor) == len(self.factor.eta) // 2)  # If scale_factor is half the size of eta
+            scale_factor = np.hstack([scale_factor, scale_factor])  # Duplicate for both poses
+        self.factor.eta *= scale_factor
+        self.factor.lam *= scale_factor
 
     def compute_messages(self, eta_damping):
         """
@@ -371,7 +547,7 @@ class Factor:
         for v in range(len(self.adj_vIDs)):
             self.messages[v].lam = messages_lam[v]
             self.messages[v].eta = messages_eta[v]
-
+            self.messages[v].energy = self.energy()
 
 class ContractionFactor(Factor):
     def __init__(
@@ -389,6 +565,8 @@ class ContractionFactor(Factor):
         init_lambda=np.linalg.inv(init_Sigma)
         for v in range(len(self.adj_vIDs)):
             self.messages[v]=NdimGaussian(self.adj_var_nodes[v].dofs, init_eta, init_lambda)
+        
+        self.compute_messages(0)
 
     def compute_factor(self, linpoint=None, update_self=True):
         pass
@@ -402,17 +580,20 @@ class ContractionFactor(Factor):
         """
         # must have only two adjacent nodes
         assert len(self.adj_vIDs) == 2
-        messages=[]
+        _messages=[]
         start_dim = 0
 
         for v in range(len(self.adj_vIDs)):
-            messages.append(self.adj_var_nodes[v].belief)
-
+            belief_id=self.adj_vIDs.index(self.adj_var_nodes[v].variableID)
+            _messages.append(copy.deepcopy(self.adj_var_nodes[v].belief))
+        
         # swap the belief of nodes as output message
-        messages[0], messages[1] = messages[1], messages[0]
+        swap=_messages[0]
+        _messages[0]=_messages[1]
+        _messages[1]=swap
 
         for v in range(len(self.adj_vIDs)):
-            self.messages[v]=self.contraction(self.messages[v], messages[v], v)
+            self.messages[v]=self.contraction(self.messages[v], copy.deepcopy(_messages[v]), v)
 
     def dz(self, z1: NdimGaussian, z2: NdimGaussian):  # z1 - z2
         mu1 = np.linalg.inv(z1.lam) @ z1.eta
@@ -421,7 +602,7 @@ class ContractionFactor(Factor):
         Sigma2 = np.linalg.inv(z2.lam)
 
         dmu = mu1 - mu2
-        dSigma = (Sigma1 + Sigma2)/2
+        dSigma =  Sigma2 + Sigma1
         dlambda = np.linalg.inv(dSigma)
         deta = dlambda @ dmu
         return NdimGaussian(dmu.shape[0], deta, dlambda)
@@ -457,12 +638,12 @@ class ContractionFactor(Factor):
         d_current= self.kl_divergence_gaussian(z1, z2)
         # print(d_current)
         if(d_current<1e-6):
-            return z1
+            return z2
 
-        dz= self.dz(z1, z2)
+        dz= self.dz(z2, z1)
         
         alpha=0.9
-        d_reset=3
+        d_reset=0 # chi2 - dim
         d_target=alpha*self.d_last[i]*alpha
         if(d_current<=d_target or d_current>d_reset):
             self.d_last[i]=d_current
@@ -489,3 +670,20 @@ class ContractionFactor(Factor):
         new_mu = mu1 + _lambda * dmu
         new_eta = new_lambda @ new_mu
         return NdimGaussian(new_mu.shape[0], new_eta, new_lambda)
+
+class PriorFactor(Factor):
+    def __init__(self, factor_id, adj_var_nodes, measurement, gauss_noise_std, meas_fn, jac_fn, loss=None, mahalanobis_threshold=2, *args):
+        super().__init__(factor_id, adj_var_nodes, measurement, gauss_noise_std, meas_fn, jac_fn, loss, mahalanobis_threshold, *args)
+
+        assert(len(adj_var_nodes) == 1)
+        self.compute_messages(0)
+    
+    def compute_residual(self):
+        return 0
+    
+    def compute_messages(self, eta_damping):
+        self.messages[0].eta = self.measurement
+        self.messages[0].lam = np.eye(self.measurement.shape[0]) / self.gauss_noise_var
+
+    def compute_factor(self, linpoint=None, update_self=True):
+        return super().compute_factor(linpoint, update_self)

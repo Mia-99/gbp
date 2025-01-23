@@ -21,7 +21,7 @@ def read_g2ofile(fileName):
             # Parse measurement (x, y, z, quaternion)
             x, y, z = map(float, parts[3:6])
             qx, qy, qz, qw = map(float, parts[6:10])
-            measurements.append((x, y, z, [qw, qx, qy, qz]))  # Quaternion in (w, x, y, z) order
+            measurements.append((x, y, z, qw, qx, qy, qz))  # Quaternion in (w, x, y, z) order
 
             # Parse information matrix
             m = np.zeros((6, 6))
